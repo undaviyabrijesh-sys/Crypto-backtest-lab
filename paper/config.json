@@ -2,8 +2,17 @@
   "exchange": "binanceus",
   "symbol": "BTC/USDT",
   "tf": "15m",
-  "strategy": "strategies/ema.py",
-  "params": {"ema": 21, "use_short": 1},
+  "strategy": "strategies/fvg_zone.py",
+  "params": {
+    "min_gap_pct": 0.0,
+    "big_mult": 1.5,
+    "retrace": 0.5,
+    "retrace_wait": 3,
+    "buffer_pct": 0.02,
+    "max_wait": 1,
+    "max_zone_age": 300,
+    "use_short": 1
+  },
   "fee": 0.0006,
   "start_equity": 10000,
   "risk": {
@@ -13,6 +22,6 @@
     "tp2_r": 2.0,
     "lot1_pct": 50,
     "tsl": true,
-    "exit_on_signal": true
+    "exit_on_signal": false
   }
 }
