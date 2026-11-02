@@ -1,19 +1,18 @@
 """Backtest engines.
 
-run(df, signal, fee, risk=None)
+run(df, signal, fee, risk=None, slp=None)
   risk=None  -> "Signal only": hold the signal position, trade at candle close.
   risk=dict  -> "SL / TP (2 lots)": event-driven, intrabar SL/TP using candle high/low.
-
-The SL/TP logic lives in step(), which the paper-trading runner (paper.py) also uses,
-so backtest and forward test behave identically.
+  slp        -> optional Series of stop prices, or DataFrame with columns "sl" (stop price) and
+                "tp" (Target-2 price), supplied by the strategy on signal bars.
 
 Rules of the SL/TP engine
 - Entry at the CLOSE of the bar where the signal changes into +1/-1 (edge, not level).
 - Total size = 100% of equity, split into lot 1 (lot1_pct) and lot 2 (rest).
-- SL for both lots = entry -/+ SL distance. TP1 (lot 1) and TP2 (lot 2) are multiples of the SL distance.
+- SL for both lots = entry -/+ SL distance. TP1 (lot 1) and TP2 (lot 2) are multiples of the SL distance
+  (TP2 can be a strategy-supplied price if it is at least TP1 away).
 - When TP1 is hit, lot 1 books and (if tsl) lot 2's SL moves to cost (entry).
 - If one candle touches both SL and TP, SL is assumed first (conservative).
-  After TP1, if the same candle also reaches the new cost-SL, lot 2 is closed at cost.
 - Gaps: stops fill at the open if the open is already beyond the stop.
 - exit_on_signal: close remaining lots at the close when the signal changes/flattens.
 """
@@ -41,7 +40,7 @@ def _finish(st, t):
     return tr
 
 
-def step(st, t, o, h, l, c, sig, prev, rk, fee, slp=0.0):
+def step(st, t, o, h, l, c, sig, prev, rk, fee, slp=0.0, tpx=0.0):
     """Advance one CLOSED candle. Returns (mark-to-market equity, closed_trade_or_None, entered_bool)."""
     closed = None
     d = st["dir"]
@@ -96,9 +95,12 @@ def step(st, t, o, h, l, c, sig, prev, rk, fee, slp=0.0):
             dist = rk["sl"] if rk["sl_mode"] == "points" else c * rk["sl"] / 100.0
         if dist > 0:
             w1 = min(max(rk["lot1_pct"], 0), 100) / 100.0
+            tp2 = c + s * rk["tp2_r"] * dist
+            if tpx and ((tpx > c) if s == 1 else (tpx < c)) and abs(tpx - c) >= rk["tp1_r"] * dist:
+                tp2 = tpx             # strategy-supplied target (e.g. previous swing)
             st.update(dir=s, entry=float(c), w1=w1, w2=1.0 - w1,
                       sl1=c - s * dist, sl2=c - s * dist,
-                      tp1=c + s * rk["tp1_r"] * dist, tp2=c + s * rk["tp2_r"] * dist,
+                      tp1=c + s * rk["tp1_r"] * dist, tp2=tp2,
                       risk=dist / c, real=-fee, t0=str(t), moved=False, rs=[])
             entered = True
 
@@ -139,8 +141,14 @@ def run_simple(df, pos, fee=0.0006):
 
 def run_sltp(df, sig, fee, rk, slp=None):
     rk = {**DEFAULT_RISK, **rk}
-    SLP = (pd.Series(slp, index=df.index).fillna(0).to_numpy(dtype=float)
-           if slp is not None else np.zeros(len(df)))
+    TPX = np.zeros(len(df))
+    if slp is None:
+        SLP = np.zeros(len(df))
+    elif isinstance(slp, pd.DataFrame):          # columns: "sl" (stop price), "tp" (target-2 price)
+        lv = slp.reindex(df.index).fillna(0)
+        SLP, TPX = lv["sl"].to_numpy(dtype=float), lv["tp"].to_numpy(dtype=float)
+    else:
+        SLP = pd.Series(slp, index=df.index).fillna(0).to_numpy(dtype=float)
     sig = pd.Series(sig, index=df.index).fillna(0).clip(-1, 1).astype(int)
     prev = sig.shift(1).fillna(0).astype(int)
     O, H, L, C = (df[k].to_numpy(dtype=float) for k in ("open", "high", "low", "close"))
@@ -149,7 +157,7 @@ def run_sltp(df, sig, fee, rk, slp=None):
     n = len(df)
     eq, pos, trades = np.empty(n), np.zeros(n), []
     for i, t in enumerate(df.index):
-        e, closed, _ = step(st, t, O[i], H[i], L[i], C[i], int(S[i]), int(PV[i]), rk, fee, SLP[i])
+        e, closed, _ = step(st, t, O[i], H[i], L[i], C[i], int(S[i]), int(PV[i]), rk, fee, SLP[i], TPX[i])
         eq[i], pos[i] = e, st["dir"]
         if closed:
             trades.append(closed)
